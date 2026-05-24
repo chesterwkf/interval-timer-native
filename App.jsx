@@ -5,6 +5,7 @@ import {
 } from 'react-native'
 import Svg, { Circle, Path, Rect } from 'react-native-svg'
 import * as Location from 'expo-location'
+import { supabase } from './lib/supabase'
 
 // ── constants ─────────────────────────────────────────────────────────────────
 const ACCENT = '#D4FF3A'
@@ -65,32 +66,7 @@ function useInterval(callback, delay) {
   }, [delay])
 }
 
-// ── Mock history data ─────────────────────────────────────────────────────────
-function fakeTimes(n, target, profile) {
-  const out = []
-  for (let i = 0; i < n; i++) {
-    let d
-    if (profile === 'fast')   d = -(2 + ((i * 7) % 5))
-    else if (profile === 'slow')  d = 2 + ((i * 11) % 7)
-    else if (profile === 'mixed') d = ((i * 13) % 11) - 5
-    else d = ((i * 5) % 5) - 2
-    out.push(Math.max(2, target + d))
-  }
-  return out
-}
 
-const PAST_WORKOUTS = [
-  { id: 'w1',  dateOffset: 0,   sets: 6,  work: 45, rest: 15, label: 'EMOM',      actualTimes: fakeTimes(6,  45, 'mixed') },
-  { id: 'w2',  dateOffset: -1,  sets: 8,  work: 30, rest: 10, label: 'Sprints',   actualTimes: fakeTimes(8,  30, 'fast') },
-  { id: 'w3',  dateOffset: -2,  sets: 5,  work: 60, rest: 30, label: 'Tabata',    actualTimes: fakeTimes(5,  60, 'paced') },
-  { id: 'w4',  dateOffset: -4,  sets: 4,  work: 90, rest: 30, label: 'Long sets', actualTimes: null },
-  { id: 'w5',  dateOffset: -6,  sets: 10, work: 20, rest: 10, label: 'Tabata',    actualTimes: fakeTimes(10, 20, 'slow') },
-  { id: 'w6',  dateOffset: -7,  sets: 6,  work: 45, rest: 20, label: 'EMOM',      actualTimes: fakeTimes(6,  45, 'paced') },
-  { id: 'w7',  dateOffset: -9,  sets: 5,  work: 45, rest: 15, label: 'Standard',  actualTimes: null },
-  { id: 'w8',  dateOffset: -11, sets: 8,  work: 30, rest: 15, label: 'Sprints',   actualTimes: fakeTimes(8,  30, 'mixed') },
-  { id: 'w9',  dateOffset: -14, sets: 6,  work: 60, rest: 20, label: 'EMOM',      actualTimes: fakeTimes(6,  60, 'fast') },
-  { id: 'w10', dateOffset: -16, sets: 4,  work: 60, rest: 30, label: 'Long sets', actualTimes: null },
-]
 
 function totalSecs(w) { return w.sets * w.work + Math.max(0, w.sets - 1) * w.rest }
 
@@ -421,6 +397,7 @@ function Setup({ config, setConfig, onStart, onHistory }) {
 function DistanceWorkView({ config, state, setState, onQuit }) {
   const { setIdx, remaining, paused, dist = 0, elapsed = 0, overtime } = state
   const distKm   = dist / 1000
+  const targetKm = config.distance / 1000
   const progress = Math.min(1, dist / Math.max(1, config.distance))
 
   const paceStr = (() => {
@@ -433,7 +410,7 @@ function DistanceWorkView({ config, state, setState, onQuit }) {
   })()
 
   const timeStr   = overtime ? `+${fmtTime(elapsed - config.work)}` : fmtTime(remaining)
-  const timeColor = overtime ? '#FF6B47' : C.inkDark2
+  const timeColor = overtime ? '#FF6B47' : C.inkDark
 
   return (
     <View style={s.dw}>
@@ -451,19 +428,15 @@ function DistanceWorkView({ config, state, setState, onQuit }) {
         <View style={{ width: 36 }} />
       </View>
 
-      {/* Timer at top */}
-      <Text style={[s.dwTimer, { color: timeColor }]}>{timeStr}</Text>
-
-      {/* Pace — big center */}
+      {/* Timer + Pace + Distance grouped in center */}
       <View style={s.dwMain}>
+        <Text style={[s.dwTimer, { color: timeColor }]}>{timeStr}</Text>
         <Text style={s.dwBig}>{paceStr}</Text>
         <Text style={s.dwUnit}>Pace (/km)</Text>
-      </View>
-
-      {/* Distance */}
-      <View style={s.dwDistWrap}>
-        <Text style={s.dwDistVal}>{distKm.toFixed(2)}</Text>
-        <Text style={s.dwDistLbl}>Distance (km)</Text>
+        <View style={s.dwDistWrap}>
+          <Text style={s.dwDistVal}>{distKm.toFixed(2)}<Text style={s.dwDistTarget}>/{targetKm.toFixed(2)}</Text></Text>
+          <Text style={s.dwDistLbl}>Distance (km)</Text>
+        </View>
       </View>
 
       {/* Progress bar */}
@@ -474,21 +447,35 @@ function DistanceWorkView({ config, state, setState, onQuit }) {
 
       {/* Pause + set dots */}
       <View style={s.dwBottom}>
-        <Pressable
-          style={({ pressed }) => [s.dwPause, pressed && { opacity: 0.8 }]}
-          onPress={() => setState(p => ({ ...p, paused: !p.paused }))}
-        >
-          {paused ? (
-            <Svg width={18} height={20} viewBox="0 0 18 20">
-              <Path d="M2 1l14 9-14 9z" fill={C.inkDark}/>
-            </Svg>
-          ) : (
+        {paused ? (
+          <View style={s.pausedRow}>
+            <Pressable
+              style={({ pressed }) => [s.pause, { flex: 1 }, pressed && { opacity: 0.8 }]}
+              onPress={() => setState(p => ({ ...p, paused: false }))}
+            >
+              <Svg width={14} height={16} viewBox="0 0 14 16">
+                <Path d="M2 1l11 7-11 7z" fill={C.inkDark}/>
+              </Svg>
+              <Text style={s.pauseText}>Resume</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [s.pause, s.pauseFinish, { flex: 1 }, pressed && { opacity: 0.8 }]}
+              onPress={() => setState(p => ({ ...p, phase: 'complete', paused: false }))}
+            >
+              <Text style={s.pauseText}>Finish</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <Pressable
+            style={({ pressed }) => [s.dwPause, pressed && { opacity: 0.8 }]}
+            onPress={() => setState(p => ({ ...p, paused: true }))}
+          >
             <Svg width={16} height={18} viewBox="0 0 16 18">
               <Rect x="1" y="1" width="4.5" height="16" rx="0.7" fill={C.inkDark}/>
               <Rect x="10.5" y="1" width="4.5" height="16" rx="0.7" fill={C.inkDark}/>
             </Svg>
-          )}
-        </Pressable>
+          </Pressable>
+        )}
         <View style={s.dwDots}>
           {Array.from({ length: config.sets }).map((_, i) => (
             <View key={i} style={[
@@ -518,17 +505,38 @@ function Workout({ config, state, setState, onQuit, accent = ACCENT }) {
   useInterval(() => {
     setState(prev => {
       if (prev.paused) return prev
-      const dt   = 0.1
+      const dt = 0.1
+
+      // Overtime: work timer expired but distance target not yet reached
+      if (prev.overtime) {
+        const elapsed = +((prev.elapsed || 0) + dt).toFixed(2)
+        if (prev.dist >= config.distance) {
+          // Distance reached — end the set
+          const newTimes = [...(prev.actualTimes || []), Math.round(elapsed)]
+          if (prev.setIdx >= config.sets)
+            return { ...prev, phase: 'complete', overtime: false, elapsed, actualTimes: newTimes }
+          if (config.rest <= 0)
+            return { ...prev, phase: 'work', setIdx: prev.setIdx + 1, remaining: config.work, elapsed: 0, dist: 0, overtime: false, actualTimes: newTimes }
+          return { ...prev, phase: 'rest', remaining: config.rest, overtime: false, elapsed, actualTimes: newTimes }
+        }
+        return { ...prev, elapsed }
+      }
+
       const next = +(prev.remaining - dt).toFixed(2)
       if (next > 0) {
-        const elapsed = prev.phase === 'work' ? (prev.elapsed || 0) + dt : prev.elapsed
+        const elapsed = prev.phase === 'work' ? +((prev.elapsed || 0) + dt).toFixed(2) : prev.elapsed
         return { ...prev, remaining: next, elapsed }
       }
       if (prev.phase === 'ready') {
         return { ...prev, phase: 'work', remaining: config.work, elapsed: 0, dist: 0 }
       }
       if (prev.phase === 'work') {
-        const newTimes = [...(prev.actualTimes || []), config.work]
+        const elapsed = +((prev.elapsed || 0) + dt).toFixed(2)
+        // Distance mode and target not yet hit — go overtime instead of rest
+        if (config.distance > 0 && prev.dist < config.distance) {
+          return { ...prev, remaining: 0, overtime: true, elapsed }
+        }
+        const newTimes = [...(prev.actualTimes || []), Math.round(elapsed)]
         if (prev.setIdx >= config.sets)
           return { ...prev, phase: 'complete', remaining: 0, actualTimes: newTimes }
         if (config.rest <= 0)
@@ -536,7 +544,7 @@ function Workout({ config, state, setState, onQuit, accent = ACCENT }) {
         return { ...prev, phase: 'rest', remaining: config.rest, lastTime: config.work, actualTimes: newTimes }
       }
       if (prev.phase === 'rest') {
-        return { ...prev, phase: 'work', setIdx: prev.setIdx + 1, remaining: config.work, elapsed: 0, dist: 0 }
+        return { ...prev, phase: 'work', setIdx: prev.setIdx + 1, remaining: config.work, elapsed: 0, dist: 0, overtime: false }
       }
       return prev
     })
@@ -603,27 +611,36 @@ function Workout({ config, state, setState, onQuit, accent = ACCENT }) {
         </View>
       </View>
 
-      <Pressable
-        style={({ pressed }) => [s.pause, pressed && { opacity: 0.8 }]}
-        onPress={() => setState(p => ({ ...p, paused: !p.paused }))}
-      >
-        {paused ? (
-          <>
+      {paused ? (
+        <View style={s.pausedRow}>
+          <Pressable
+            style={({ pressed }) => [s.pause, { flex: 1 }, pressed && { opacity: 0.8 }]}
+            onPress={() => setState(p => ({ ...p, paused: false }))}
+          >
             <Svg width={14} height={16} viewBox="0 0 14 16">
               <Path d="M2 1l11 7-11 7z" fill={C.inkDark}/>
             </Svg>
             <Text style={s.pauseText}>Resume</Text>
-          </>
-        ) : (
-          <>
-            <Svg width={12} height={14} viewBox="0 0 12 14">
-              <Rect x="1" y="1" width="3.5" height="12" rx="0.6" fill={C.inkDark}/>
-              <Rect x="7.5" y="1" width="3.5" height="12" rx="0.6" fill={C.inkDark}/>
-            </Svg>
-            <Text style={s.pauseText}>Pause</Text>
-          </>
-        )}
-      </Pressable>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [s.pause, s.pauseFinish, { flex: 1 }, pressed && { opacity: 0.8 }]}
+            onPress={() => setState(p => ({ ...p, phase: 'complete', paused: false }))}
+          >
+            <Text style={s.pauseText}>Finish</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <Pressable
+          style={({ pressed }) => [s.pause, pressed && { opacity: 0.8 }]}
+          onPress={() => setState(p => ({ ...p, paused: true }))}
+        >
+          <Svg width={12} height={14} viewBox="0 0 12 14">
+            <Rect x="1" y="1" width="3.5" height="12" rx="0.6" fill={C.inkDark}/>
+            <Rect x="7.5" y="1" width="3.5" height="12" rx="0.6" fill={C.inkDark}/>
+          </Svg>
+          <Text style={s.pauseText}>Pause</Text>
+        </Pressable>
+      )}
     </View>
   )
 }
@@ -631,8 +648,9 @@ function Workout({ config, state, setState, onQuit, accent = ACCENT }) {
 // ── Complete screen ───────────────────────────────────────────────────────────
 function Complete({ config, onDone, accent = ACCENT, actualTimes = [] }) {
   const hasT = actualTimes.length > 0
-  const times = hasT ? actualTimes : Array.from({ length: config.sets }, () => config.work)
-  const totalActive = times.reduce((a, t) => a + t, 0)
+  const times = actualTimes
+  const completedSets = times.length
+  const totalActive = hasT ? times.reduce((a, t) => a + t, 0) : 0
   const avgDelta = hasT
     ? times.reduce((a, t) => a + (t - config.work), 0) / times.length
     : 0
@@ -658,9 +676,9 @@ function Complete({ config, onDone, accent = ACCENT, actualTimes = [] }) {
 
       <View style={s.stats}>
         {[
-          { val: String(config.sets), lbl: 'Sets',  align: 'flex-start' },
-          { val: fmtTime(totalActive), lbl: 'Work', align: 'center' },
-          { val: fmtTime(totalActive + Math.max(0, config.sets - 1) * config.rest), lbl: 'Total', align: 'flex-end' },
+          { val: String(completedSets), lbl: 'Sets',  align: 'flex-start' },
+          { val: hasT ? fmtTime(totalActive) : '--:--', lbl: 'Work', align: 'center' },
+          { val: hasT ? fmtTime(totalActive + Math.max(0, completedSets - 1) * config.rest) : '--:--', lbl: 'Total', align: 'flex-end' },
         ].map(({ val, lbl, align }) => (
           <View key={lbl} style={[s.stat, { alignItems: align }]}>
             <Text style={s.statVal}>{val}</Text>
@@ -675,7 +693,9 @@ function Complete({ config, onDone, accent = ACCENT, actualTimes = [] }) {
       </View>
 
       <ScrollView style={s.cbScroll} showsVerticalScrollIndicator={false}>
-        {times.map((t, i) => (
+        {!hasT ? (
+          <Text style={{ color: C.inkDark3, fontSize: 14, textAlign: 'center', paddingTop: 24 }}>No sets recorded</Text>
+        ) : times.map((t, i) => (
           <View key={i} style={s.cbRow}>
             <Text style={s.cbIdx}>{String(i + 1).padStart(2, '0')}</Text>
             <Text style={s.cbTime}>{fmtTime(t)}</Text>
@@ -698,16 +718,47 @@ function Complete({ config, onDone, accent = ACCENT, actualTimes = [] }) {
 }
 
 // ── History screen ────────────────────────────────────────────────────────────
+function dayOffset(createdAt) {
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  const d = new Date(createdAt); d.setHours(0, 0, 0, 0)
+  return Math.round((d - today) / 86400000)
+}
+
 function History({ onBack, onPick }) {
+  const [workouts, setWorkouts] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    supabase
+      .from('workouts')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(100)
+      .then(({ data }) => {
+        setWorkouts((data || []).map(w => ({
+          ...w,
+          dateOffset: dayOffset(w.created_at),
+          actualTimes: w.actual_times,
+          actualDuration: w.actual_duration,
+        })))
+        setLoading(false)
+      })
+  }, [])
+
   const groups = []
   let lastBucket = null
-  PAST_WORKOUTS.forEach(w => {
+  workouts.forEach(w => {
     const b = bucketLabel(w.dateOffset)
     if (b !== lastBucket) { groups.push({ bucket: b, items: [] }); lastBucket = b }
     groups[groups.length - 1].items.push(w)
   })
-  const thisWeek = PAST_WORKOUTS.filter(w => w.dateOffset >= -6)
-  const weekTotal = thisWeek.reduce((a, w) => a + totalSecs(w), 0)
+  const thisWeek = workouts.filter(w => w.dateOffset >= -6)
+  const weekTotal = thisWeek.reduce((a, w) => {
+    const dur = w.actualTimes && w.actualTimes.length > 0
+      ? w.actualTimes.reduce((s, t) => s + t, 0) + Math.max(0, w.actualTimes.length - 1) * w.rest
+      : (w.actualDuration ?? totalSecs(w))
+    return a + dur
+  }, 0)
 
   return (
     <View style={s.lightScreen}>
@@ -734,7 +785,11 @@ function History({ onBack, onPick }) {
       </View>
 
       <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
-        {groups.map(g => (
+        {loading ? (
+          <Text style={{ color: C.inkDark3, fontSize: 14, textAlign: 'center', paddingTop: 40 }}>Loading...</Text>
+        ) : workouts.length === 0 ? (
+          <Text style={{ color: C.inkDark3, fontSize: 14, textAlign: 'center', paddingTop: 40 }}>No workouts yet</Text>
+        ) : groups.map(g => (
           <View key={g.bucket} style={s.histGroup}>
             <Text style={s.histBucket}>{g.bucket}</Text>
             {g.items.map(w => (
@@ -754,7 +809,11 @@ function History({ onBack, onPick }) {
                   </View>
                 </View>
                 <View style={s.histRowRight}>
-                  <Text style={s.histRowTotal}>{fmtTime(totalSecs(w))}</Text>
+                  <Text style={s.histRowTotal}>{fmtTime(
+                    w.actualTimes && w.actualTimes.length > 0
+                      ? w.actualTimes.reduce((a, t) => a + t, 0) + Math.max(0, w.actualTimes.length - 1) * w.rest
+                      : (w.actualDuration ?? totalSecs(w))
+                  )}</Text>
                   <Svg width={10} height={14} viewBox="0 0 10 14">
                     <Path d="M2 2l5 5-5 5" stroke={C.inkDark3} strokeWidth="1.6" fill="none"
                       strokeLinecap="round" strokeLinejoin="round"/>
@@ -771,14 +830,16 @@ function History({ onBack, onPick }) {
 
 // ── Detail screen ─────────────────────────────────────────────────────────────
 function Detail({ workout: w, onBack, accent = ACCENT }) {
-  const total     = totalSecs(w)
-  const totalWork = w.sets * w.work
-  const totalRest = Math.max(0, w.sets - 1) * w.rest
+  const times = (w.actualTimes && w.actualTimes.length > 0) ? w.actualTimes : []
+  const completedSets = times.length
+  const totalWork = times.reduce((a, t) => a + t, 0)
+  const totalRest = Math.max(0, completedSets - 1) * w.rest
+  const total     = completedSets > 0 ? totalWork + totalRest : (w.actualDuration ?? 0)
 
   const segments = []
-  for (let i = 0; i < w.sets; i++) {
-    segments.push({ kind: 'work', secs: w.work })
-    if (i < w.sets - 1 && w.rest > 0) segments.push({ kind: 'rest', secs: w.rest })
+  for (let i = 0; i < completedSets; i++) {
+    segments.push({ kind: 'work', secs: times[i] })
+    if (i < completedSets - 1 && w.rest > 0) segments.push({ kind: 'rest', secs: w.rest })
   }
 
   return (
@@ -798,7 +859,7 @@ function Detail({ workout: w, onBack, accent = ACCENT }) {
         <Text style={s.eyebrow}>{w.label}</Text>
         <Text style={s.detailTime}>{fmtTime(total)}</Text>
         <View style={s.histRowSub}>
-          <Text style={s.histRowSubTxt}>{w.sets} sets</Text>
+          <Text style={s.histRowSubTxt}>{completedSets} sets</Text>
           <Text style={s.sep}>·</Text>
           <Text style={s.histRowSubTxt}>{fmtTime(w.work)} work</Text>
           <Text style={s.sep}>·</Text>
@@ -806,30 +867,32 @@ function Detail({ workout: w, onBack, accent = ACCENT }) {
         </View>
       </View>
 
-      <View style={s.timeline}>
-        <View style={s.timelineBar}>
-          {segments.map((seg, i) => (
-            <View
-              key={i}
-              style={[s.tlSeg, {
-                flex: seg.secs,
-                backgroundColor: seg.kind === 'work' ? accent : 'rgba(20,22,26,0.10)',
-              }]}
-            />
-          ))}
+      {completedSets > 0 && (
+        <View style={s.timeline}>
+          <View style={s.timelineBar}>
+            {segments.map((seg, i) => (
+              <View
+                key={i}
+                style={[s.tlSeg, {
+                  flex: seg.secs,
+                  backgroundColor: seg.kind === 'work' ? accent : 'rgba(20,22,26,0.10)',
+                }]}
+              />
+            ))}
+          </View>
+          <View style={s.timelineLegend}>
+            {[
+              { color: accent, label: `Work · ${fmtTime(totalWork)}` },
+              { color: 'rgba(20,22,26,0.18)', label: `Rest · ${fmtTime(totalRest)}` },
+            ].map(({ color, label }) => (
+              <View key={label} style={s.legendItem}>
+                <View style={[s.legendSwatch, { backgroundColor: color }]} />
+                <Text style={s.legendText}>{label}</Text>
+              </View>
+            ))}
+          </View>
         </View>
-        <View style={s.timelineLegend}>
-          {[
-            { color: accent, label: `Work · ${fmtTime(totalWork)}` },
-            { color: 'rgba(20,22,26,0.18)', label: `Rest · ${fmtTime(totalRest)}` },
-          ].map(({ color, label }) => (
-            <View key={label} style={s.legendItem}>
-              <View style={[s.legendSwatch, { backgroundColor: color }]} />
-              <Text style={s.legendText}>{label}</Text>
-            </View>
-          ))}
-        </View>
-      </View>
+      )}
 
       <View style={s.cbTitleRow}>
         <Text style={[s.cbTitle, { color: C.inkDark3 }]}>Per set</Text>
@@ -837,19 +900,18 @@ function Detail({ workout: w, onBack, accent = ACCENT }) {
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
-        {Array.from({ length: w.sets }).map((_, i) => {
-          const actual = w.actualTimes ? w.actualTimes[i] : w.work
-          return (
-            <View key={i} style={[s.cbRow, { borderTopColor: DH }]}>
-              <Text style={[s.cbIdx, { color: C.inkDark3 }]}>{String(i + 1).padStart(2, '0')}</Text>
-              <Text style={[s.cbTime, { color: C.inkDark }]}>{fmtTime(actual)}</Text>
-              <View style={{ flex: 1 }}>
-                <DeltaBar actual={actual} target={w.work} />
-              </View>
-              {w.actualTimes && <DeltaBadge actual={actual} target={w.work} compact />}
+        {(!w.actualTimes || w.actualTimes.length === 0) ? (
+          <Text style={{ color: C.ink3, fontSize: 14, textAlign: 'center', paddingTop: 24 }}>No sets recorded</Text>
+        ) : w.actualTimes.map((actual, i) => (
+          <View key={i} style={[s.cbRow, { borderTopColor: DH }]}>
+            <Text style={[s.cbIdx, { color: C.inkDark3 }]}>{String(i + 1).padStart(2, '0')}</Text>
+            <Text style={[s.cbTime, { color: C.inkDark }]}>{fmtTime(actual)}</Text>
+            <View style={{ flex: 1 }}>
+              <DeltaBar actual={actual} target={w.work} />
             </View>
-          )
-        })}
+            <DeltaBadge actual={actual} target={w.work} compact />
+          </View>
+        ))}
         <View style={{ paddingTop: 18, paddingBottom: 4 }}>
           <Pressable
             style={({ pressed }) => [s.begin, { backgroundColor: accent, opacity: pressed ? 0.9 : 1 }]}
@@ -874,6 +936,7 @@ export default function App() {
 
   const locationSub = useRef(null)
   const lastPos     = useRef(null)
+  const startedAt   = useRef(null)
 
   const stopTracking = useCallback(() => {
     locationSub.current?.remove()
@@ -912,6 +975,7 @@ export default function App() {
 
   const onStart = useCallback(() => {
     setComplete(false)
+    startedAt.current = Date.now()
     setState({ phase: 'ready', setIdx: 1, remaining: 3, paused: false,
                dist: 0, elapsed: 0, overtime: false, actualTimes: [], lastTime: null })
   }, [])
@@ -920,9 +984,22 @@ export default function App() {
 
   useEffect(() => {
     if (state?.phase === 'complete') {
-      setFinalTimes(state.actualTimes || [])
+      const times = state.actualTimes || []
+      const actualDuration = startedAt.current ? Math.round((Date.now() - startedAt.current) / 1000) : null
+      setFinalTimes(times)
       setComplete(true)
       setState(null)
+      supabase.from('workouts').insert({
+        sets: config.sets,
+        work: config.work,
+        rest: config.rest,
+        distance: config.distance,
+        actual_times: times.length > 0 ? times : null,
+        actual_duration: actualDuration,
+        label: `${config.sets}×${fmtTime(config.work)}`,
+      }).then(({ error }) => {
+        if (error) console.error('Supabase insert error:', error)
+      })
     }
   }, [state])
 
@@ -1018,6 +1095,8 @@ const s = StyleSheet.create({
   bigTimeReady:{ fontSize: 108, fontWeight: '200' },
   upnext:      { fontSize: 13, letterSpacing: 0.5, color: C.inkDark2 },
   pause:       { height: 58, borderRadius: 29, backgroundColor: 'rgba(255,255,255,0.07)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
+  pauseFinish: { backgroundColor: 'rgba(255,100,80,0.12)', borderColor: 'rgba(255,100,80,0.18)' },
+  pausedRow:   { flexDirection: 'row', gap: 12 },
   pauseText:   { fontSize: 15, fontWeight: '500', letterSpacing: 0.3, color: C.inkDark },
 
   lastCard:       { alignItems: 'center', gap: 8, paddingTop: 10 },
@@ -1033,13 +1112,14 @@ const s = StyleSheet.create({
   dwSetLbl:       { flex: 1, textAlign: 'center', fontSize: 11, letterSpacing: 3, fontWeight: '700', color: C.inkDark3 },
   dwSetNum:       { fontFamily: MONO, color: C.inkDark },
   dwSetOf:        { color: C.inkDark3 },
-  dwTimer:        { textAlign: 'center', fontFamily: MONO, fontVariant: ['tabular-nums'], fontSize: 18, fontWeight: '500', letterSpacing: 1, marginTop: 20, marginBottom: 0 },
-  dwMain:         { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8 },
+  dwTimer:        { textAlign: 'center', fontFamily: MONO, fontVariant: ['tabular-nums'], fontSize: 72, fontWeight: '600', letterSpacing: -3, color: C.inkDark, lineHeight: 78, marginBottom: 45 },
+  dwMain:         { flex: 1, alignItems: 'center', justifyContent: 'center' },
   dwBig:          { fontFamily: MONO, fontVariant: ['tabular-nums'], fontSize: 96, fontWeight: '700', letterSpacing: -5, color: C.inkDark, lineHeight: 100 },
-  dwUnit:         { fontSize: 13, color: C.inkDark2, letterSpacing: 0.3 },
-  dwDistWrap:     { alignItems: 'center', paddingBottom: 28 },
-  dwDistVal:      { fontFamily: MONO, fontVariant: ['tabular-nums'], fontSize: 48, fontWeight: '600', letterSpacing: -2, color: C.inkDark, lineHeight: 54 },
-  dwDistLbl:      { fontSize: 12, color: C.inkDark3, letterSpacing: 0.5, marginTop: 4 },
+  dwUnit:         { fontSize: 16, fontWeight: '600', color: C.inkDark, letterSpacing: 0.3, marginBottom: 45 },
+  dwDistWrap:     { alignItems: 'center' },
+  dwDistVal:      { fontFamily: MONO, fontVariant: ['tabular-nums'], fontSize: 50, fontWeight: '600', letterSpacing: -3, color: C.inkDark, lineHeight: 78 },
+  dwDistTarget:   { fontSize: 70, fontWeight: '600', color: C.inkDark, letterSpacing: -3 },
+  dwDistLbl:      { fontSize: 16, fontWeight: '600', color: C.inkDark, letterSpacing: 0.3, marginTop: 6 },
   dwProgressWrap: { height: 2, marginHorizontal: 0, marginBottom: 20 },
   dwProgressTrack:{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.12)', borderRadius: 2 },
   dwProgressFill: { position: 'absolute', left: 0, top: 0, bottom: 0, backgroundColor: C.inkDark, borderRadius: 2 },
