@@ -16,3 +16,4 @@ yarn-debug.*
 yarn-error.*
 interval-timer-app/
 .specstory/
+.DS_Store

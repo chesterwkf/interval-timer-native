@@ -11,8 +11,19 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.intervaltimerapp"
     },
+    "android": {
+      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
+    },
     "splash": {
       "backgroundColor": "#0B0C0E"
-    }
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow Interval Timer to access your location to track distance during workouts."
+        }
+      ]
+    ]
   }
 }

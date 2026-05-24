@@ -4,6 +4,7 @@ import {
   StatusBar, Platform, Dimensions, ScrollView,
 } from 'react-native'
 import Svg, { Circle, Path, Rect } from 'react-native-svg'
+import * as Location from 'expo-location'
 
 // ── constants ─────────────────────────────────────────────────────────────────
 const ACCENT = '#D4FF3A'
@@ -42,6 +43,16 @@ function calcDelta(actual, target) {
   const sec = Math.round(abs % 60)
   const num = m > 0 ? `${m}:${String(sec).padStart(2, '0')}` : `${sec}s`
   return { kind: faster ? 'faster' : 'slower', text: `${faster ? '−' : '+'}${num}` }
+}
+
+function haversine(a, b) {
+  const R = 6371000
+  const dLat = (b.latitude  - a.latitude)  * Math.PI / 180
+  const dLon = (b.longitude - a.longitude) * Math.PI / 180
+  const x = Math.sin(dLat / 2) ** 2
+    + Math.cos(a.latitude * Math.PI / 180) * Math.cos(b.latitude * Math.PI / 180)
+    * Math.sin(dLon / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x))
 }
 
 function useInterval(callback, delay) {
@@ -407,24 +418,26 @@ function Setup({ config, setConfig, onStart, onHistory }) {
 }
 
 // ── Distance Work View ────────────────────────────────────────────────────────
-function DistanceWorkView({ config, state, setState, onQuit, accent }) {
+function DistanceWorkView({ config, state, setState, onQuit }) {
   const { setIdx, remaining, paused, dist = 0, elapsed = 0, overtime } = state
   const distKm   = dist / 1000
-  const targetKm = config.distance / 1000
   const progress = Math.min(1, dist / Math.max(1, config.distance))
 
   const paceStr = (() => {
-    if (dist < 8) return "--'--\""
-    const spk = elapsed * 1000 / dist
-    if (spk > 999) return "--'--\""
-    return `${Math.floor(spk / 60)}'${String(Math.floor(spk % 60)).padStart(2, '0')}"`
+    if (dist < 8 || elapsed < 1) return '--:--'
+    const spk = elapsed / (dist / 1000) // seconds per km
+    if (spk > 3599) return '--:--'
+    const m = Math.floor(spk / 60)
+    const sec = Math.floor(spk % 60)
+    return `${m}:${String(sec).padStart(2, '0')}`
   })()
 
-  const timeStr  = overtime ? `+${fmtTime(elapsed - config.work)}` : fmtTime(remaining)
-  const timeLabel = overtime ? 'Over' : 'Time'
+  const timeStr   = overtime ? `+${fmtTime(elapsed - config.work)}` : fmtTime(remaining)
+  const timeColor = overtime ? '#FF6B47' : C.inkDark2
 
   return (
     <View style={s.dw}>
+      {/* Top bar: X + set counter */}
       <View style={s.dwTop}>
         <Pressable style={s.dwX} onPress={onQuit}>
           <Svg width={14} height={14} viewBox="0 0 14 14">
@@ -438,29 +451,28 @@ function DistanceWorkView({ config, state, setState, onQuit, accent }) {
         <View style={{ width: 36 }} />
       </View>
 
-      <View style={s.dwStats}>
-        {[
-          { val: paceStr,  lbl: 'Pace',  align: 'flex-start' },
-          { val: '--',     lbl: 'BPM',   align: 'center' },
-          { val: timeStr,  lbl: timeLabel, align: 'flex-end', over: overtime },
-        ].map(({ val, lbl, align, over }) => (
-          <View key={lbl} style={[s.dwStat, { alignItems: align }]}>
-            <Text style={[s.dwStatVal, over && { color: '#B23A0E' }]}>{val}</Text>
-            <Text style={s.dwStatLbl}>{lbl}</Text>
-          </View>
-        ))}
-      </View>
+      {/* Timer at top */}
+      <Text style={[s.dwTimer, { color: timeColor }]}>{timeStr}</Text>
 
+      {/* Pace — big center */}
       <View style={s.dwMain}>
-        <Text style={s.dwBig}>{distKm.toFixed(2)}</Text>
-        <Text style={s.dwUnit}>Kilometres · target {targetKm.toFixed(2)}</Text>
+        <Text style={s.dwBig}>{paceStr}</Text>
+        <Text style={s.dwUnit}>Pace (/km)</Text>
       </View>
 
+      {/* Distance */}
+      <View style={s.dwDistWrap}>
+        <Text style={s.dwDistVal}>{distKm.toFixed(2)}</Text>
+        <Text style={s.dwDistLbl}>Distance (km)</Text>
+      </View>
+
+      {/* Progress bar */}
       <View style={s.dwProgressWrap}>
         <View style={s.dwProgressTrack} />
         <View style={[s.dwProgressFill, { width: `${progress * 100}%` }]} />
       </View>
 
+      {/* Pause + set dots */}
       <View style={s.dwBottom}>
         <Pressable
           style={({ pressed }) => [s.dwPause, pressed && { opacity: 0.8 }]}
@@ -860,12 +872,50 @@ export default function App() {
   const [route, setRoute]       = useState('setup')
   const [picked, setPicked]     = useState(null)
 
+  const locationSub = useRef(null)
+  const lastPos     = useRef(null)
+
+  const stopTracking = useCallback(() => {
+    locationSub.current?.remove()
+    locationSub.current = null
+    lastPos.current = null
+  }, [])
+
+  const startTracking = useCallback(async () => {
+    stopTracking()
+    const { status } = await Location.requestForegroundPermissionsAsync()
+    if (status !== 'granted') return
+    locationSub.current = await Location.watchPositionAsync(
+      { accuracy: Location.Accuracy.BestForNavigation, distanceInterval: 2 },
+      (pos) => {
+        if (lastPos.current) {
+          const delta = haversine(lastPos.current.coords, pos.coords)
+          setState(prev => prev ? { ...prev, dist: (prev.dist || 0) + delta } : prev)
+        }
+        lastPos.current = pos
+      }
+    )
+  }, [stopTracking])
+
+  // Start GPS on work phase; stop when leaving work or when workout ends
+  const prevPhase = useRef(null)
+  useEffect(() => {
+    if (!state) { stopTracking(); prevPhase.current = null; return }
+    const { phase } = state
+    if (phase === 'work' && prevPhase.current !== 'work' && config.distance > 0) {
+      startTracking()
+    } else if (phase !== 'work' && prevPhase.current === 'work') {
+      stopTracking()
+    }
+    prevPhase.current = phase
+  }, [state?.phase, state == null, config.distance, startTracking, stopTracking])
+
   const onStart = useCallback(() => {
     setComplete(false)
     setState({ phase: 'ready', setIdx: 1, remaining: 3, paused: false,
                dist: 0, elapsed: 0, overtime: false, actualTimes: [], lastTime: null })
   }, [])
-  const onQuit = useCallback(() => { setState(null); setComplete(false) }, [])
+  const onQuit = useCallback(() => { stopTracking(); setState(null); setComplete(false) }, [stopTracking])
   const onDone = useCallback(() => { setState(null); setComplete(false) }, [])
 
   useEffect(() => {
@@ -977,28 +1027,28 @@ const s = StyleSheet.create({
   lastCardTarget: { fontSize: 11, color: 'rgba(245,245,244,0.4)', letterSpacing: 0.5 },
 
   // ── Distance Work View
-  dw:           { flex: 1, paddingHorizontal: 24, paddingTop: 48, paddingBottom: 28, backgroundColor: C.bgDark },
-  dwTop:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 8 },
-  dwX:          { width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
-  dwSetLbl:     { flex: 1, textAlign: 'center', fontSize: 11, letterSpacing: 3, fontWeight: '700', color: C.inkDark3 },
-  dwSetNum:     { fontFamily: MONO, color: C.inkDark },
-  dwSetOf:      { color: C.inkDark3 },
-  dwStats:      { flexDirection: 'row', justifyContent: 'space-between', marginTop: 36, paddingHorizontal: 8, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.08)', paddingBottom: 16 },
-  dwStat:       { flex: 1, gap: 4 },
-  dwStatVal:    { fontFamily: MONO, fontVariant: ['tabular-nums'], fontSize: 16, fontWeight: '600', letterSpacing: -0.2, color: C.inkDark },
-  dwStatLbl:    { fontSize: 11, letterSpacing: 2.5, textTransform: 'uppercase', color: C.inkDark3 },
-  dwMain:       { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
-  dwBig:        { fontFamily: MONO, fontVariant: ['tabular-nums'], fontSize: 96, fontWeight: '700', letterSpacing: -5, color: C.inkDark, lineHeight: 96 },
-  dwUnit:       { fontSize: 13, color: C.inkDark2, letterSpacing: 0.3 },
-  dwProgressWrap: { height: 2, marginHorizontal: 24, marginBottom: 18 },
-  dwProgressTrack: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.12)', borderRadius: 2 },
-  dwProgressFill:  { position: 'absolute', left: 0, top: 0, bottom: 0, backgroundColor: C.inkDark, borderRadius: 2 },
-  dwBottom:     { alignItems: 'center', gap: 18, paddingBottom: 10 },
-  dwPause:      { width: 56, height: 56, borderRadius: 28, backgroundColor: 'rgba(255,255,255,0.10)', alignItems: 'center', justifyContent: 'center' },
-  dwDots:       { flexDirection: 'row', gap: 8 },
-  dwDot:        { width: 6, height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.22)' },
-  dwDotActive:  { backgroundColor: C.inkDark, transform: [{ scale: 1.3 }] },
-  dwDotDone:    { backgroundColor: 'rgba(255,255,255,0.45)' },
+  dw:             { flex: 1, paddingHorizontal: 24, paddingTop: 48, paddingBottom: 28, backgroundColor: C.bgDark },
+  dwTop:          { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 8 },
+  dwX:            { width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
+  dwSetLbl:       { flex: 1, textAlign: 'center', fontSize: 11, letterSpacing: 3, fontWeight: '700', color: C.inkDark3 },
+  dwSetNum:       { fontFamily: MONO, color: C.inkDark },
+  dwSetOf:        { color: C.inkDark3 },
+  dwTimer:        { textAlign: 'center', fontFamily: MONO, fontVariant: ['tabular-nums'], fontSize: 18, fontWeight: '500', letterSpacing: 1, marginTop: 20, marginBottom: 0 },
+  dwMain:         { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8 },
+  dwBig:          { fontFamily: MONO, fontVariant: ['tabular-nums'], fontSize: 96, fontWeight: '700', letterSpacing: -5, color: C.inkDark, lineHeight: 100 },
+  dwUnit:         { fontSize: 13, color: C.inkDark2, letterSpacing: 0.3 },
+  dwDistWrap:     { alignItems: 'center', paddingBottom: 28 },
+  dwDistVal:      { fontFamily: MONO, fontVariant: ['tabular-nums'], fontSize: 48, fontWeight: '600', letterSpacing: -2, color: C.inkDark, lineHeight: 54 },
+  dwDistLbl:      { fontSize: 12, color: C.inkDark3, letterSpacing: 0.5, marginTop: 4 },
+  dwProgressWrap: { height: 2, marginHorizontal: 0, marginBottom: 20 },
+  dwProgressTrack:{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.12)', borderRadius: 2 },
+  dwProgressFill: { position: 'absolute', left: 0, top: 0, bottom: 0, backgroundColor: C.inkDark, borderRadius: 2 },
+  dwBottom:       { alignItems: 'center', gap: 18, paddingBottom: 10 },
+  dwPause:        { width: 56, height: 56, borderRadius: 28, backgroundColor: 'rgba(255,255,255,0.10)', alignItems: 'center', justifyContent: 'center' },
+  dwDots:         { flexDirection: 'row', gap: 8 },
+  dwDot:          { width: 6, height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.22)' },
+  dwDotActive:    { backgroundColor: C.inkDark, transform: [{ scale: 1.3 }] },
+  dwDotDone:      { backgroundColor: 'rgba(255,255,255,0.45)' },
 
   // ── Complete
   complete:     { flex: 1, paddingHorizontal: 28, paddingTop: 48, paddingBottom: 28 },
